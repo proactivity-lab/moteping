@@ -7,7 +7,7 @@ import time
 import os
 
 from moteconnection.connection import Connection
-from moteconnection.message import MessageDispatcher, Message
+from moteconnection.message import MessageDispatcher, Message, AM_BROADCAST_ADDR
 from serdepa import SerdepaPacket, List, nx_uint8, nx_uint32
 
 import logging
@@ -256,7 +256,10 @@ class PingSender(threading.Thread):
                 p.ping_size, p.pong_size, p.pong_size_max,
                 rtt, delay, p.uptime_s, str(p.padding.serialize()).encode("hex").upper())
 
-            print(out)
+            if packet.source != self._destination and self._destination != AM_BROADCAST_ADDR:
+                log.debug(out)
+            else:
+                print(out)
 
         except ValueError as e:
             print_red("{} pong {}".format(self._ts_now(), e.message))
@@ -271,9 +274,9 @@ def main():
     parser.add_argument("destination", default=1, type=arg_hex2int, help="Ping destination")
 
     parser.add_argument("--count", default=0, type=int, help="Ping count, 0 for unlimited")
-    parser.add_argument("--interval", default=5.0, type=float, help="Ping interval (seconds, float)")
+    parser.add_argument("--interval", default=10.0, type=float, help="Ping interval (seconds, float)")
 
-    parser.add_argument("--pongs", default=7, type=int, help="Pong count, >= 1")
+    parser.add_argument("--pongs", default=1, type=int, help="Pong count, >= 1")
     parser.add_argument("--delay", default=100, type=int, help="Subsequent pong delay")
 
     parser.add_argument("--ping-size", default=len(PingPacket().serialize()), type=int, help="Ping size, can't be smaller than default")
@@ -283,7 +286,7 @@ def main():
     parser.add_argument("--address", default=0xFFFE, type=arg_hex2int, help="Local address")
     parser.add_argument("--group", default=0x22, type=arg_hex2int, help="Local group")
 
-    parser.add_argument("--channel", default=None, type=int, help="Radio channel")
+    #parser.add_argument("--channel", default=None, type=int, help="Radio channel")
 
     args = parser.parse_args()
 
