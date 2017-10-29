@@ -1,14 +1,20 @@
 """moteping.py: Ping application for TinyOS motes."""
+from __future__ import print_function
+
 import Queue
 import datetime
 import threading
 import signal
 import time
+import sys
 import os
 
 from moteconnection.connection import Connection
 from moteconnection.message import MessageDispatcher, Message, AM_BROADCAST_ADDR
-from serdepa import SerdepaPacket, List, nx_uint8, nx_uint32
+
+from .packets import PingPacket
+from .packets import PongPacket
+from .util import print_std, print_red, print_green, configure_colors
 
 import logging
 import logging.config
@@ -21,14 +27,6 @@ __license__ = "MIT"
 
 AMID_TOSPINGPONG_PING = 0xFA
 AMID_TOSPINGPONG_PONG = 0xFB
-
-
-def print_red(s):
-    print("\033[91m{}\033[0m".format(s))
-
-
-def print_green(s):
-    print("\033[92m{}\033[0m".format(s))
 
 
 def setup_logging(default_path="", default_level=logging.INFO, env_key='LOG_CFG'):
@@ -50,7 +48,7 @@ def setup_logging(default_path="", default_level=logging.INFO, env_key='LOG_CFG'
 
         if config is not None and len(config) > 0:
             logging.config.dictConfig(config)
-            print("Configured logging with settings from from {}".format(path))
+            print_std("Configured logging with settings from from {}".format(path))
         else:
             raise Exception("Unable to load specified logging configuration file {}".format(path))
     else:
@@ -60,89 +58,12 @@ def setup_logging(default_path="", default_level=logging.INFO, env_key='LOG_CFG'
         logging.getLogger("").addHandler(console)  # add the handler to the root logger
 
 
-class PingPacket(SerdepaPacket):
-    TOSPINGPONG_PING = 0x00
-    # typedef nx_struct {
-    # 	nx_uint8_t header;
-    # 	nx_uint32_t pingnum;
-    # 	nx_uint32_t pongs;
-    # 	nx_uint32_t delay_ms;
-    # 	nx_uint8_t ping_size; // How much was sent in PING
-    # 	nx_uint8_t pong_size; // How much should be sent in PONG
-    # 	nx_uint8_t padding[]; // 01 02 03 04 ...
-    # } TosPingPongPing_t;
-    _fields_ = [
-        ("header", nx_uint8),
-        ("pingnum", nx_uint32),
-        ("pongs", nx_uint32),
-        ("delay_ms", nx_uint32),
-        ("ping_size", nx_uint8),
-        ("pong_size", nx_uint8),
-        ("padding", List(nx_uint8))
-    ]
-
-    def __init__(self, **kwargs):
-        super(PingPacket, self).__init__(**kwargs)
-        self.header = self.TOSPINGPONG_PING
-        self.pingnum = 0
-        self.pongs = 0
-        self.delay_ms = 0
-        self.ping_size = 0
-        self.pong_size = 0
-
-
-class PongPacket(SerdepaPacket):
-    TOSPINGPONG_PONG = 0x01
-    # typedef nx_struct {
-    #     nx_uint8_t header;
-    #     nx_uint32_t pingnum;
-    #     nx_uint32_t pongs;
-    #     nx_uint32_t pong;
-    #     nx_uint8_t ping_size; // How much was actually received in PING
-    #     nx_uint8_t pong_size; // How much was sent in PONG
-    #     nx_uint8_t pong_size_max;
-    #     nx_uint32_t rx_time_ms;
-    #     nx_uint32_t tx_time_ms;
-    #     nx_uint32_t uptime_s;
-    #     nx_uint8_t padding[]; // 01 02 03 04 ...
-    # } TosPingPongPong_t;
-    _fields_ = [
-        ("header", nx_uint8),
-        ("pingnum", nx_uint32),
-        ("pongs", nx_uint32),
-        ("pong", nx_uint32),
-        ("ping_size", nx_uint8),
-        ("pong_size", nx_uint8),
-        ("pong_size_max", nx_uint8),
-        ("rx_time_ms", nx_uint32),
-        ("tx_time_ms", nx_uint32),
-        ("uptime_s", nx_uint32),
-        ("padding", List(nx_uint8))
-    ]
-
-    def __init__(self, **kwargs):
-        super(PongPacket, self).__init__(**kwargs)
-        self.pingnum = 0
-        self.pongs = 0
-        self.pong = 0
-        self.ping_size = 0
-        self.pong_size = 0
-        self.pong_size_max = 0
-        self.rx_time_ms = 0
-        self.tx_time_ms = 0
-        self.uptime_s = 0
-
-    def __str__(self):
-        return "%u %u/%u %u/%u/%u %u>>%u %u %s" % (self.pingnum, self.pong, self.pongs,
-                                                   self.ping_size, self.pong_size, self.pong_size_max,
-                                                   self.rx_time_ms, self.tx_time_ms, self.uptime_s,
-                                                   self.padding.serialize().encode("hex").upper())
-
-
 class PingSender(threading.Thread):
 
     def __init__(self, connection, args):
         super(PingSender, self).__init__()
+
+        self.replies = 0
 
         self._address = args.address
         self._destination = args.destination
@@ -183,37 +104,43 @@ class PingSender(threading.Thread):
         return s + ".%03uZ" % (now.microsecond / 1000)
 
     def run(self):
+        pingdone = False
         while self._alive.is_set():
             passed = time.time() - self._ping_start
-            if passed >= self._interval:
-                if self._count == 0 or self._pingnum < self._count:
-                    self._pingnum += 1
-                    self._ping_start = time.time()
-                    self._last_pongs = {}
+            if not pingdone and passed >= self._interval:
+                if self._connection.connected():
+                    if self._count == 0 or self._pingnum < self._count:
+                        self._pingnum += 1
+                        self._ping_start = time.time()
+                        self._last_pongs = {}
 
-                    p = PingPacket()
-                    p.pingnum = self._pingnum
-                    p.pongs = self._pongs
-                    p.delay_ms = self._delay
-                    p.ping_size = self._ping_size
-                    p.pong_size = self._pong_size
+                        p = PingPacket()
+                        p.pingnum = self._pingnum
+                        p.pongs = self._pongs
+                        p.delay_ms = self._delay
+                        p.ping_size = self._ping_size
+                        p.pong_size = self._pong_size
 
-                    out = "{} ping {:>2} 0/{} {:04X}->{:04X}[{:02X}] ({:>3}/{:>3}/???)".format(
-                        self._ts_now(), self._pingnum, self._pongs,
-                        self._address, self._destination, AMID_TOSPINGPONG_PING,
-                        self._ping_size, self._pong_size)
-                        # TODO pong_size_max should be read from connection
+                        out = "{} ping {:>2} 0/{} {:04X}->{:04X}[{:02X}] ({:>3}/{:>3}/???)".format(
+                            self._ts_now(), self._pingnum, self._pongs,
+                            self._address, self._destination, AMID_TOSPINGPONG_PING,
+                            self._ping_size, self._pong_size)
+                            # TODO pong_size_max should be read from connection
 
-                    print_green(out)
+                        print_green(out)
 
-                    try:
-                        self._connection.send(Message(AMID_TOSPINGPONG_PING, destination=self._destination,
-                                                      payload=p.serialize()))
-                    except IOError:
-                        print("{} send failed".format(self._ts_now()))
+                        try:
+                            self._connection.send(Message(AMID_TOSPINGPONG_PING, destination=self._destination,
+                                                          payload=p.serialize()))
+                        except IOError:
+                            print_std("{} send failed".format(self._ts_now()))
 
+                    else:
+                        if not pingdone:
+                            print_std("{} all pings sent".format(self._ts_now()))
+                            pingdone = True
                 else:
-                    print("{} all pings sent".format(self._ts_now()))
+                    time.sleep(0.1)
             else:
                 try:
                     p = self._incoming.get(timeout=0.1)
@@ -259,13 +186,15 @@ class PingSender(threading.Thread):
             if packet.source != self._destination and self._destination != AM_BROADCAST_ADDR:
                 log.debug(out)
             else:
-                print(out)
+                self.replies += 1
+                print_std(out)
 
         except ValueError as e:
             print_red("{} pong {}".format(self._ts_now(), e.message))
 
 
 def main():
+
     import argparse
     from argconfparse.argconfparse import arg_hex2int
 
@@ -276,8 +205,12 @@ def main():
     parser.add_argument("--count", default=0, type=int, help="Ping count, 0 for unlimited")
     parser.add_argument("--interval", default=10.0, type=float, help="Ping interval (seconds, float)")
 
+    parser.add_argument("--timeout", default=0, type=float, help="Ping process timeout (seconds, float)")
+
     parser.add_argument("--pongs", default=1, type=int, help="Pong count, >= 1")
     parser.add_argument("--delay", default=100, type=int, help="Subsequent pong delay")
+
+    parser.add_argument("--nocolor", default=None, action="store_true", help="Disable colors")
 
     parser.add_argument("--ping-size", default=len(PingPacket().serialize()), type=int, help="Ping size, can't be smaller than default")
     parser.add_argument("--pong-size", default=len(PongPacket().serialize()), type=int, help="Pong size, can't be smaller than default")
@@ -286,9 +219,13 @@ def main():
     parser.add_argument("--address", default=0xFFFE, type=arg_hex2int, help="Local address")
     parser.add_argument("--group", default=0x22, type=arg_hex2int, help="Local group")
 
-    #parser.add_argument("--channel", default=None, type=int, help="Radio channel")
+    # parser.add_argument("--channel", default=None, type=int, help="Radio channel")
+
+    started = time.time()
 
     args = parser.parse_args()
+
+    configure_colors(args.nocolor)
 
     setup_logging(default_level=logging.WARNING)
 
@@ -307,12 +244,17 @@ def main():
     pinger.start()
 
     while not interrupted.is_set():
+        if 0 < args.timeout <= time.time() - started:
+            interrupted.set()
         time.sleep(1)
 
     con.disconnect()
     con.join()
 
-    print_green("done")
+    if pinger.replies > 0:
+        return 0
+
+    return 1
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
