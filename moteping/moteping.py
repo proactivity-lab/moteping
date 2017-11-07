@@ -198,7 +198,8 @@ def main():
     import argparse
     from argconfparse.argconfparse import arg_hex2int
 
-    parser = argparse.ArgumentParser("MotePing", description="MotePing arguments", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser("MotePing", description="MotePing arguments",
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument("destination", default=1, type=arg_hex2int, help="Ping destination")
 
@@ -212,8 +213,10 @@ def main():
 
     parser.add_argument("--nocolor", default=None, action="store_true", help="Disable colors")
 
-    parser.add_argument("--ping-size", default=len(PingPacket().serialize()), type=int, help="Ping size, can't be smaller than default")
-    parser.add_argument("--pong-size", default=len(PongPacket().serialize()), type=int, help="Pong size, can't be smaller than default")
+    parser.add_argument("--oneshot", default=False, action="store_true", help="Exit with success after the first pong.")
+
+    parser.add_argument("--ping-size", default=len(PingPacket().serialize()), type=int, help="Ping size >= default")
+    parser.add_argument("--pong-size", default=len(PongPacket().serialize()), type=int, help="Pong size >= default")
 
     parser.add_argument("--connection", default="sf@localhost:9002")
     parser.add_argument("--address", default=0xFFFE, type=arg_hex2int, help="Local address")
@@ -244,8 +247,11 @@ def main():
     pinger.start()
 
     while not interrupted.is_set():
-        if 0 < args.timeout <= time.time() - started:
+        if args.oneshot and pinger.replies > 0:
             interrupted.set()
+        if args.timeout > 0:
+            if time.time() - started >= args.timeout or 0 < args.count <= pinger.replies:
+                interrupted.set()
         time.sleep(1)
 
     con.disconnect()
